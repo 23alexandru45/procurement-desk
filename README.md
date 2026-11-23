@@ -1,8 +1,9 @@
 # The Procurement Desk: team robotech.ai
 
 Rule-based agent for the Kaggle task "The Procurement Desk" (Data Sprint 2.0, Agentic AI track).
-Public leaderboard score: 1.00000 (first version). The current `submission.csv` adds one fix: prices quoted
-"per 100 fixtures/meals/shipments" are divided by 100 (changes T10060, T11145, T11613).
+Public leaderboard score: 1.00000 for both selected submissions (first version and the current `submission.csv`).
+The current `submission.csv` adds one fix: prices quoted "per 100 fixtures/meals/shipments" are divided by 100
+(changes T10060, T11145, T11613).
 
 ## Approach
 
@@ -44,6 +45,8 @@ unzip `playbook.zip` into `data/playbook/`, giving `data/playbook/playbook/polic
 Optional flag `--amd-by-number` builds variant B: when two amendments for the same category are both
 in force, the one with the higher AMD number wins, instead of the one with the later effective date (the default).
 On the competition data this changes only T11894 and T11933 (AMD-07 vs AMD-08, LED lighting).
+Variant B is superseded and was not submitted: the buyer's own earlier counters in the threads match variant A
+(`our_last_counter` equals `L(r-1)` on 1423/1423 threads), so variant A is the one used.
 
 ```
 python engine.py threads.csv submission_B.csv --amd-by-number
@@ -65,5 +68,5 @@ as a cross-check: `python verify.py data/threads.csv verify_labels.csv` agrees w
 - `engine.py`: the agent (all logic).
 - `solution.ipynb`: notebook version (writes `engine.py`, runs it on `threads.csv` from `/kaggle/input` or `./data`, checks the sample).
 - `submission.csv`: variant A predictions (default run).
-- `submission_B.csv`: variant B predictions (`--amd-by-number`).
+- `submission_B.csv`: variant B predictions (`--amd-by-number`), superseded, kept for reference only.
 - `verify.py`, `verify_labels.csv`: independent cross-check, not used to produce the submissions.
