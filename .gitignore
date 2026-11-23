@@ -1,0 +1,8 @@
+# competition data (not redistributed)
+data/
+*.zip
+# scratch / old outputs
+.ruff_cache/
+submission_v1_*.csv
+CONCURS.md
+__pycache__/
