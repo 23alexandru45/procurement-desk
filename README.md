@@ -174,7 +174,7 @@ To deploy it safely:
 
 ## 10. Original work & disclosures
 
-- `engine.py`, `verify.py`, `ui.py` and the notebook were written by team robotech.ai.
+- `engine.py`, `verify.py`, `ui.py` and the notebook were written by Alexandru Ilies (team robotech.ai, single member on Kaggle).
 - The AI coding tool **Claude Code (Anthropic)** was used to help write, test and refactor this code. Labels are produced only by running the code, never typed by hand.
 - Libraries: Python standard library only (`csv`, `re`, `math`, `fractions`, `pathlib`, `sys`, `http.server`, `json`). No external packages, templates or third-party code.
 - The only data used is the competition data. No code or labels were shared with other teams.
