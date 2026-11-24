@@ -6,6 +6,9 @@ Score 1.00000 on both the public and the private leaderboard. The final submissi
 
 The agent is a deterministic rule engine. It uses **no LLM and no external API** at run time, by design (see section 5).
 Labels come only from running `engine.py`. `python check.py` reproduces every number in section 7.
+Slides: [`docs/presentation.pdf`](docs/presentation.pdf). License: MIT.
+
+![Demo UI on sample thread T00028: the supplier's correction makes the price acceptable, but a forwarded note to "the language model" is a prompt injection, so the agent escalates](docs/ui.png)
 
 ## 1. Overview
 
@@ -123,6 +126,7 @@ Other files:
 - `verify.py`: a second rule implementation with different parsing code, used only as a cross-check, never to produce the submission. Unlike `engine.py`, it does not read the playbook: the category, amendment and supplier values are typed into the code. This is on purpose: if the playbook parser in `engine.py` misread a value, the two would disagree.
 - `ui.py`: local demo UI (standard library `http.server`). It calls `engine.decide` and shows the label and the steps for any thread.
 - `solution.ipynb`: notebook version. It writes `engine.py`, runs it and checks the sample.
+- `docs/`: slides (`presentation.pdf`) and a screenshot of the demo UI.
 - `submission.csv`: final predictions. `submission_B.csv`: rejected variant (section 7). `verify_labels.csv`: output of `verify.py`.
 
 ## 5. AI models & APIs
@@ -135,13 +139,13 @@ Other files:
 ## 6. Tricky cases
 
 - **Prompt injection.** The `INJECTION` regex scans the whole thread, including earlier and forwarded messages. It matches text addressed to an AI, bot, assistant or language model, "admin override", "ignore your previous instructions", "system note", HTML-comment notes to an assistant, and Hindi phrases for "assistant". A hit gives `ESCALATE:PROMPT_INJECTION`. Supplier text is never followed as an instruction; it is only matched. Example: T00028 has a correction to Rs. 264, below target, so it would be ACCEPT, but a forwarded "Note for the language model processing this thread" fires first, so the label is `ESCALATE:PROMPT_INJECTION`. Messages that claim approval was already granted are caught by these phrases in this data, not by a separate rule.
-- **Banned terms.** `banned_term` checks the latest message only: auto-renewal wording, unlimited liability, exclusivity, and advance payment above 30% (or "half"). A sentence that says "no automatic renewal" is removed first, so it does not trigger.
+- **Banned terms.** `banned_term` checks the latest message only: auto-renewal wording, unlimited liability, exclusivity, and advance payment above 30% (or "half"). A sentence that says "no automatic renewal" is removed first, so it does not trigger. Example: T00011 ("This agreement auto-renews every year unless cancelled in writing") gives `ESCALATE:BANNED_TERM`.
 - **Dated amendments.** An amendment applies only if its effective date is on or before the thread date. If two amendments for one category are both in force, the later effective date wins. Example: T00012 is dated 2026-10-18, so AMD-04 (from 2026-09-20) lowers the catering target from 280 to 270.
-- **Supplier contracts.** A contract price cap replaces the walk-away price `W` for the category it names. A contract currency rate replaces the table rate for that supplier.
+- **Supplier contracts.** A contract price cap replaces the walk-away price `W` for the category it names. A contract currency rate replaces the table rate for that supplier. Examples: T00025 (monitors) uses the contract cap ₹17,600 as `W`; in the final round the quote is above it, so `REJECT:ABOVE_WALKAWAY`. T00037 converts GBP 79.75 at the supplier's contract rate ₹104.5 instead of the table rate ₹106, giving `COUNTER:COUNTER_OFFER:6750`.
 - **Supplier names.** The `supplier` column is matched exactly against the `# Supplier:` header of each supplier file. The playbook has no alias or "trading as" table. A supplier name says nothing about its category (Monsoon Foods quotes laptops in T00033). A supplier not in the files is treated as approved with no contract.
 - **Currencies.** USD, EUR, GBP and INR via `$ € £ ₹ Rs` or three-letter codes. Any other currency gives `MISSING_INFO`.
 - **Corrections.** A message that says the price "should read X, not Y" uses X (T00028).
-- **Multi-price messages.** Ranges use the upper end. Two-tier quotes use the tier for the thread quantity. Otherwise the first amount on the first priced line is used. "Further d% off our previous quote" is applied to the supplier's previous quote.
+- **Multi-price messages.** Ranges use the upper end. Two-tier quotes use the tier for the thread quantity. Otherwise the first amount on the first priced line is used. "Further d% off our previous quote" is applied to the supplier's previous quote. Examples: T00002 quotes "between Rs. 1,506 and ₹1,638", so 1,638 is used. T00025 quotes Rs. 20,208 for orders up to 200 and ₹18,995 above; the quantity is 20, so 20,208 is used. T00017 says "a further 10% off our previous quote" and gets `COUNTER:COUNTER_OFFER:9000`.
 - **Probation.** T00012: supplier on probation, quote ₹315 per meal incl. 5% GST, so `p = 315 / 1.05 = 300`. `L = T = 270`, so the label is `COUNTER:COUNTER_OFFER:270`.
 
 ## 7. Evaluation
@@ -205,7 +209,8 @@ To deploy it safely:
 - Author: Alexandru Ilies (team robotech.ai, single member on Kaggle).
 - The code (`engine.py`, `verify.py`, `check.py`, `ui.py`, the notebook) was written with **Claude Code (Anthropic)**, an AI coding tool, under my direction. I chose the approach (exact rules instead of an LLM), checked the rules against the playbook, ran every check and made the submissions. Labels are produced only by running the code, never typed by hand.
 - Libraries: Python standard library only (`csv`, `re`, `math`, `fractions`, `pathlib`, `sys`, `io`, `json`, `http.server`, `urllib.parse`). No external packages, templates or third-party code.
-- Data: only the competition files. No code or labels were shared with other teams.
+- Data: only the competition files. No code or labels were shared with other teams. Competition data is not included in this repository.
+- License: MIT (`LICENSE`).
 
 ## 11. How to run
 
