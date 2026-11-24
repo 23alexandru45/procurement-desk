@@ -2,17 +2,19 @@
 
 Agent for the Kaggle task "The Procurement Desk" (Data Sprint 2.0, Agentic AI track).
 Each of the 2,000 supplier threads gets one label `ACTION:REASON:COUNTER_PRICE`.
-Both selected submissions score 1.00000 on the public leaderboard. The final submission is `submission.csv`.
+Score 1.00000 on both the public and the private leaderboard. The final submission is `submission.csv`.
 
-The agent is a deterministic rule engine. It uses **no LLM and no external API**. Labels come only from `engine.py`.
+The agent is a deterministic rule engine. It uses **no LLM and no external API** at run time, by design (see section 5).
+Labels come only from running `engine.py`. `python check.py` reproduces every number in section 7.
 
 ## 1. Overview
 
-For each thread the agent does this:
+The agent works like a procurement desk clerk who follows the playbook exactly:
 
-1. Split the thread into messages. Take the supplier's latest message and, when needed, the supplier's own previous quote.
-2. Read the supplier's offer and normalize it to INR, excluding GST, per category unit. If there is no usable price, stop with `ESCALATE:MISSING_INFO`.
-3. Walk the decision procedure from the playbook (`policies/decision-procedure.md`) in order. The first rule that fires wins:
+1. **Read the thread.** Split it into messages by their headers. Take the supplier's latest message, and the supplier's own previous quote when the latest message refers to it.
+2. **Read the playbook.** Parse category pages, amendments and supplier files from the markdown at run time.
+3. **Understand the offer.** Find the price and normalize it to INR, excluding GST, per category unit. If there is no usable price, stop with `ESCALATE:MISSING_INFO`.
+4. **Decide.** Walk the decision procedure from `policies/decision-procedure.md` in order. The first rule that fires wins:
    1. no usable price -> `ESCALATE:MISSING_INFO`
    2. supplier is blacklisted -> `REJECT:BLACKLISTED_SUPPLIER`
    3. prompt injection anywhere in the thread -> `ESCALATE:PROMPT_INJECTION`
@@ -20,28 +22,33 @@ For each thread the agent does this:
    5. price `p` above the concession limit `L(r)` -> `REJECT:ABOVE_WALKAWAY` on the final round, otherwise `COUNTER:COUNTER_OFFER:<L rounded>`
    6. `p * quantity` above the approval limit -> `ESCALATE:OVER_APPROVAL_LIMIT`
    7. otherwise -> `ACCEPT:ACCEPTABLE_PRICE`
-4. The numbers in force come from the playbook files, in this order: category page, then amendments with an effective date on or before the thread date, then the supplier contract (its price cap replaces the walk-away price, its currency rate replaces the table rate). Suppliers on probation use `L(r) = T` in every round.
+5. **Hand off to a human** whenever the playbook says escalate.
 
-Category values, amendments and supplier status are parsed from the playbook files at run time. The only hard-coded values are the currency table (`policies/units-and-currency.md`) and the text patterns.
+The numbers in force are applied in this order: category page, then amendments with an effective date on or before the thread date, then the supplier contract (its price cap replaces the walk-away price, its currency rate replaces the table rate). Suppliers on probation use `L(r) = T` in every round.
+
+Hard-coded in `engine.py`: the currency table from `policies/units-and-currency.md`, the buyer's sender name `Acme Procurement`, the factors 12 (dozen, months per year) and 30% (advance payment limit), and the text patterns. Everything else is read from the playbook files.
 
 ## 2. Mathematics
 
 All arithmetic uses exact rationals (`fractions.Fraction`), so there are no floating-point rounding errors.
 
-**Price normalization.** Let `p` be the quoted amount, `qty` the thread quantity, `rate` the currency rate to INR.
+**Price normalization.** `p` is the offer in INR, excluding GST, per category unit. `qty` is the thread quantity. The steps run in this order (`engine.py`, `offer`):
 
-- Currency: `p = amount * rate`. Table: USD 84.5, EUR 91, GBP 106, INR 1. A supplier contract rate replaces the table rate. A currency outside this set gives `MISSING_INFO`.
-- Ranges ("between A and B"): take the upper end, `p = max(A, B)`.
-- Quantity tier ("orders of up to N ..."): pick the price for the tier that contains `qty`.
-- List-price discount "d% discount on our list price": `p = p * (1 - d/100)`.
-- Volume discount "further d% off for orders of N": applies only if `qty >= N`, `p = p * (1 - d/100)`.
-- Free units "plus f free ... for every m": `p = p * m / (m + f)`.
-- Total price "in total for all N": `p = p / N`.
-- Dozen: `p = p / 12`. Pack: `p = p / pack_size` (from the quote, or from the category page). Ream: `p = p * reams_per_unit`. "Per 100 fixtures": `p = p / 100`.
-- GST inclusive: `p = p / (1 + gst)`, with `gst` from the category page.
-- Billing period: subscription categories use a fixed period. Monthly to yearly is `p * 12`, yearly to monthly is `p / 12`. A subscription price with no period gives `MISSING_INFO`.
-- "Further d% off our previous quote": `p = p_prev * (1 - d/100)`, where `p_prev` is the supplier's own earlier quote.
-- CORRECTION ("should read ..."): the corrected amount replaces the old one.
+1. CORRECTION: if the message says the price "should read X, not Y", use X.
+2. Otherwise take the first line that contains an amount (or a "further d% off our previous quote" line).
+3. "Further d% off our previous quote": `p = p_prev * (1 - d/100)`, where `p_prev` is the supplier's own previous quote (the last earlier message not sent by Acme Procurement), normalized by these same steps.
+4. Range "between A and B": the upper end, `max(A, B)`. Two-tier quote "orders of up to N ...": first price if `qty <= N`, else the second price. Otherwise the first amount on the line.
+5. Currency: `p = amount * rate`. Table: USD 84.5, EUR 91, GBP 106, INR 1. A supplier contract rate replaces the table rate. Any other currency gives `MISSING_INFO`.
+6. "d% discount on our list price": `p = p * (1 - d/100)`.
+7. Volume discount "further d% off for orders of N": only if `qty >= N`, `p = p * (1 - d/100)`.
+8. Free units "plus f free ... for every m": `p = p * m / (m + f)`.
+9. "In total for all N": `p = p / N`.
+10. Dozen: `p = p / 12`. Pack: "per pack of N" gives `p / N`, "per pack" gives `p / pack_size` from the category page. Otherwise "per N <units>" gives `p / N`.
+11. "Per ream": `p = p * reams_per_unit` from the category page.
+12. GST inclusive: `p = p / (1 + gst)`, with `gst` from the category page.
+13. Billing period (subscription categories only): monthly to yearly is `p * 12`, yearly to monthly is `p / 12`. A subscription price with no period gives `MISSING_INFO`.
+
+Amounts are read with `₹ Rs $ € £` or a three-letter code, with optional `k`, `lakh` or `crore` suffixes. Amounts in words are read when followed by "rupees" (units up to lakh).
 
 **Concession schedule.** With target `T`, walk-away `W`, rounds `R`, exponent `beta`, current round `r`:
 
@@ -53,9 +60,12 @@ L(r) = T + (W - T) * ((r - 1) / (R - 1)) ** beta
 
 **Counter rounding.** `counter = floor(L(r) + 1/2)`, rounding half up to whole rupees.
 
-**Approval limit.** Escalate if `p * qty > limit`, where `limit` is the category approval limit (possibly changed by an amendment). This check comes after the price check.
-
 **Final round.** If `p > L(r)` and `r >= R`, the label is `REJECT:ABOVE_WALKAWAY`. Otherwise it is a `COUNTER` at `L(r)` rounded.
+
+**Approval limit.** Checked only when `p <= L(r)`. Escalate if `p * qty > limit`, where `p` is per unit in INR excluding GST (for subscriptions, one billing period) and `limit` is the category approval limit, possibly changed by an amendment.
+
+**Example (thread T00033, sample data).** Laptops: `T = 62000`, `W = 70000`, `R = 4`, `beta = 2`, round `r = 2`.
+`L(2) = 62000 + 8000 * (1/3)^2 = 62888.89`. The quote is INR 71,900 per laptop, above `L(2)`, and round 2 is not final, so the label is `COUNTER:COUNTER_OFFER:62889`.
 
 ## 3. Architecture diagram
 
@@ -93,103 +103,121 @@ flowchart TD
 
 Everything is rule-based Python code. **No part uses an LLM.**
 
-`engine.py` (about 200 lines, standard library only):
+`engine.py` (197 lines, standard library only) produces the submission:
 
 | Function | Role |
 |---|---|
-| `load_playbook(root)` | Parses categories (target, walk-away, rounds, exponent, approval limit, GST, unit), amendments (effective date, field, value) and suppliers (status, contract rates, price caps) from the markdown files. |
+| `load_playbook(root)` | Parses categories (target, walk-away, rounds, exponent, approval limit, GST, unit, pack and ream sizes), amendments (effective date, field, value) and suppliers (status, contract rates, price caps) from the markdown files. |
 | `split_thread(msg)` | Splits a thread into `Earlier` and `Latest` messages by their headers. |
-| `amounts(line)` / `words_to_num` | Finds amounts with currency symbols or codes, `k`/`lakh`/`crore` suffixes, and amounts written in words. |
-| `offer(...)` | Normalizes the supplier's offer to INR excluding GST per category unit. Raises `Missing` if no usable price exists. |
+| `amounts(line)` / `words_to_num` | Finds amounts with currency symbols or codes, `k`/`lakh`/`crore` suffixes, and amounts in words ending in "rupees". |
+| `offer(...)` | Normalizes the supplier's offer to INR excluding GST per category unit (section 2). Raises `Missing` if no usable price exists. |
+| `INJECTION` | Regex of prompt-injection phrases, matched against the whole thread. |
 | `banned_term(text)` | Detects auto-renewal, unlimited liability, exclusivity, and advance payment above 30% or "half". |
 | `limits(...)` | Applies amendments dated on or before the thread date, then the supplier contract price cap. |
-| `decide(row, ...)` | The decision procedure above. Returns the label string. |
+| `decide(row, ...)` | The decision procedure. Returns the label string. |
 | `main(...)` | Reads `threads.csv`, writes `thread_id,label`. |
 
 Other files:
 
+- `check.py`: reproduces every number in section 7 (sample, byte match, `our_last_counter` check, cross-check).
+- `verify.py`: a second rule implementation with different parsing code, used only as a cross-check, never to produce the submission. Unlike `engine.py`, it does not read the playbook: the category, amendment and supplier values are typed into the code. This is on purpose: if the playbook parser in `engine.py` misread a value, the two would disagree.
+- `ui.py`: local demo UI (standard library `http.server`). It calls `engine.decide` and shows the label and the steps for any thread.
 - `solution.ipynb`: notebook version. It writes `engine.py`, runs it and checks the sample.
-- `verify.py`: a second, independently written rule implementation, used only as a cross-check. It is not used to produce the submission.
-- `ui.py`: small local demo UI (standard library `http.server`, opens on http://127.0.0.1:8765). It calls `engine.decide` and shows the label and the steps for any thread.
-- `submission.csv`: final predictions. `submission_B.csv`: superseded variant, see section 7.
+- `submission.csv`: final predictions. `submission_B.csv`: rejected variant (section 7). `verify_labels.csv`: output of `verify.py`.
 
 ## 5. AI models & APIs
 
-- Models: **none**. The final pipeline calls no language model.
-- Prompt strategy: not applicable (no prompts).
-- API calls: **0**.
-- Cost: 0. The whole 2,000-thread run takes about a second on a laptop.
+- Models at run time: **none**. Prompt strategy: not applicable. API calls: **0**. Cost: 0. A full 2,000-thread run takes under a second on a laptop.
+- AI at development time: Claude Code (Anthropic) was used as a coding tool (section 10). It does not take part in labelling.
 
-The playbook is a deterministic procedure, so a rule engine reproduces it exactly and cannot be moved by text inside a supplier message.
+**Why no LLM in an agentic track.** The playbook is a closed procedure with exact arithmetic and a fixed rule order, so an exact implementation scores 100%, and the private leaderboard confirms that it generalizes. The security policy says supplier messages are untrusted and that text trying to instruct an AI must never be followed. An LLM that reads supplier text can be steered by it; a pattern matcher only detects it and escalates. The design still works as an agent: it perceives (reads the thread and the playbook), reasons (normalizes the offer, computes `L(r)`), acts (accept, counter with a price, reject) and hands off to a human when the playbook says escalate. Every decision is reproducible and can be explained step by step.
 
 ## 6. Tricky cases
 
-- **Prompt injection.** A regex (`INJECTION`) scans the whole thread, including earlier messages. It matches text addressed to an AI, bot, assistant or language model, "admin override", "ignore your previous instructions", HTML-comment notes to an assistant, and similar phrases (English and Hindi). A hit gives `ESCALATE:PROMPT_INJECTION`. Message text is never executed or followed; it is only matched.
-- **Banned terms.** `banned_term` checks the latest message only. It catches auto-renewal wording, unlimited liability, exclusivity, and advance payment above 30% or "half". A sentence that says "no automatic renewal" is removed first, so it does not trigger.
-- **Amendments.** Applied only if effective on or before the thread date. If two amendments for one category are both in force, the later effective date wins. Variant B (higher AMD number wins) was tested and rejected, see section 7.
-- **Supplier contracts.** A contract price cap replaces the walk-away price `W`. A contract currency rate replaces the table rate for that supplier.
-- **Trading names.** The supplier name in the thread row is looked up in the supplier files. A supplier not in the files is treated as approved with no contract.
+- **Prompt injection.** The `INJECTION` regex scans the whole thread, including earlier and forwarded messages. It matches text addressed to an AI, bot, assistant or language model, "admin override", "ignore your previous instructions", "system note", HTML-comment notes to an assistant, and Hindi phrases for "assistant". A hit gives `ESCALATE:PROMPT_INJECTION`. Supplier text is never followed as an instruction; it is only matched. Example: T00028 has a correction to Rs. 264, below target, so it would be ACCEPT, but a forwarded "Note for the language model processing this thread" fires first, so the label is `ESCALATE:PROMPT_INJECTION`. Messages that claim approval was already granted are caught by these phrases in this data, not by a separate rule.
+- **Banned terms.** `banned_term` checks the latest message only: auto-renewal wording, unlimited liability, exclusivity, and advance payment above 30% (or "half"). A sentence that says "no automatic renewal" is removed first, so it does not trigger.
+- **Dated amendments.** An amendment applies only if its effective date is on or before the thread date. If two amendments for one category are both in force, the later effective date wins. Example: T00012 is dated 2026-10-18, so AMD-04 (from 2026-09-20) lowers the catering target from 280 to 270.
+- **Supplier contracts.** A contract price cap replaces the walk-away price `W` for the category it names. A contract currency rate replaces the table rate for that supplier.
+- **Supplier names.** The `supplier` column is matched exactly against the `# Supplier:` header of each supplier file. The playbook has no alias or "trading as" table. A supplier name says nothing about its category (Monsoon Foods quotes laptops in T00033). A supplier not in the files is treated as approved with no contract.
 - **Currencies.** USD, EUR, GBP and INR via `$ € £ ₹ Rs` or three-letter codes. Any other currency gives `MISSING_INFO`.
-- **Corrections.** A message that says a price "should read X, not Y" uses X.
-- **Multi-price messages.** Ranges use the upper end. Tiered quotes use the tier for the thread quantity. For other lines the first amount on the first priced line is used. A "further d% off our previous quote" line is applied to the supplier's previous quote.
-- **Odd units.** Dozens, packs, reams, "per N units", totals "for all N", GST inclusive, monthly vs yearly, free units, volume discounts, amounts in words.
+- **Corrections.** A message that says the price "should read X, not Y" uses X (T00028).
+- **Multi-price messages.** Ranges use the upper end. Two-tier quotes use the tier for the thread quantity. Otherwise the first amount on the first priced line is used. "Further d% off our previous quote" is applied to the supplier's previous quote.
+- **Probation.** T00012: supplier on probation, quote ₹315 per meal incl. 5% GST, so `p = 315 / 1.05 = 300`. `L = T = 270`, so the label is `COUNTER:COUNTER_OFFER:270`.
 
 ## 7. Evaluation
 
-- Sample: `engine.py` reproduces `sample_answers.csv` on **40 / 40** threads.
-- Public leaderboard: **1.00000** for both selected submissions.
-- Internal consistency check: the buyer's own earlier counter in the thread (`our_last_counter`) equals `L(r-1)` computed by the engine on **1423 / 1423** threads that have one. This independently confirms the schedule and the amendment ordering.
-- Cross-check: `verify.py`, written separately, agrees with `submission.csv` on **2000 / 2000** threads.
-- Label counts in `submission.csv`: COUNTER 627, ACCEPT 359, OVER_APPROVAL_LIMIT 286, ABOVE_WALKAWAY 227, PROMPT_INJECTION 160, BANNED_TERM 144, BLACKLISTED_SUPPLIER 105, MISSING_INFO 92.
+Run `python check.py` to reproduce all of these:
 
-What changed between submissions:
+| Check | Result |
+|---|---|
+| Sample threads vs official `sample_answers.csv` | **40 / 40** |
+| `engine.py` output vs `submission.csv` | byte-identical |
+| Buyer's own earlier counter `our_last_counter` equals our `L(r-1)` | **1423 / 1423** threads that have one |
+| Same check with variant B amendment order | 1416 / 1423 |
+| `verify.py` (second implementation) vs `submission.csv` | **2000 / 2000** |
+| Kaggle public and private leaderboard | **1.00000** |
 
-1. First version: all rules, without the "per N units" case.
-2. Final version (`submission.csv`): prices quoted "per 100 fixtures/meals/shipments" are divided by 100. This changes T10060, T11145 and T11613. Nothing else changed.
+The `our_last_counter` check uses data the engine never reads for its decision, so it independently confirms the concession schedule, the rounding and the amendment order on 1423 threads.
 
-Variant B (`--amd-by-number`, `submission_B.csv`): when two amendments are both in force, the higher AMD number wins instead of the later effective date. It differs from the final answers only on T11894 and T11933. The `our_last_counter` check above matches the effective-date rule, so variant B was never submitted. To produce it: `python engine.py data/threads.csv submission_B.csv --amd-by-number`.
+Label counts in `submission.csv`: COUNTER 627, ACCEPT 359, OVER_APPROVAL_LIMIT 286, ABOVE_WALKAWAY 227, PROMPT_INJECTION 160, BANNED_TERM 144, BLACKLISTED_SUPPLIER 105, MISSING_INFO 92.
 
-Error analysis: no known errors on the sample or on the public part. Main residual risk is a message phrasing in the hidden part that no pattern covers; see section 9.
+**Worked examples** (sample threads, engine output equals the official answer):
+
+| Thread | What happens | Label |
+|---|---|---|
+| T00033 | Laptops, round 2 of 4, `beta = 2`. Quote INR 71,900 > `L(2) = 62888.89`. | `COUNTER:COUNTER_OFFER:62889` |
+| T00012 | Probation supplier, AMD-04 target 270, ₹315 incl. 5% GST = 300 > 270. | `COUNTER:COUNTER_OFFER:270` |
+| T00028 | Correction to Rs. 264 (below target), but a forwarded note to "the language model". Injection is checked first. | `ESCALATE:PROMPT_INJECTION:` |
+
+**What changed between submissions:**
+
+1. First submission: all rules, without the "per N units" case.
+2. Final submission (`submission.csv`): prices quoted "per 100 fixtures/meals/shipments" are divided by 100. This changes T10060, T11145 and T11613. Nothing else changed. Both scored 1.00000 on the public leaderboard.
+
+**Rejected variant B** (`python engine.py data/threads.csv submission_B.csv --amd-by-number`): when two amendments are both in force, the higher AMD number wins instead of the later effective date. It changes only T11894 and T11933. It matches `our_last_counter` on only 1416/1423 threads (the 7 failures expect 2080 and get 2065), so it was never submitted.
+
+**Error analysis.** No known errors on the sample, the public or the private part. The rules that needed the most care were the amendment order (settled by the `our_last_counter` check), "per N units" pricing, and the rule order when a thread has both a correction and an injection.
 
 ## 8. Real-world application
 
-A procurement team could use the agent as a first-pass desk: it reads each supplier reply, normalizes the quote, and returns accept, counter with a number, reject, or escalate to a person, with the rule that fired. Because it is rule-based, every decision can be explained and audited, and it cannot be talked into a decision by supplier text.
+A procurement team could use the agent as a first-pass desk: it reads each supplier reply, normalizes the quote, and returns accept, counter with a number, reject, or escalate to a person, together with the rule that fired (`ui.py` shows these steps). Because it is rule-based, every decision can be explained and audited, and supplier text cannot instruct it.
 
 To deploy it safely:
 
 - Keep a human on every `ESCALATE` and review a sample of `ACCEPT` and `COUNTER` decisions.
-- Load category, amendment and supplier data from the system of record, with the rate table kept current.
+- Load category, amendment and supplier data from the system of record, and keep the currency table current.
 - Log the input, the rule that fired and the playbook version for every decision.
-- Add an approval step before any counter is actually sent.
-- Add tests for each new quote format before accepting it.
+- Require a human approval step before any counter is actually sent.
+- Add a test (like `check.py`) for each new quote format before trusting it.
+- Treat a new phrasing that no pattern covers as a reason to escalate, not to guess.
 
 ## 9. Drawbacks & limitations
 
-- Parsing is regex based. A supplier phrasing the price in a way no pattern covers is treated as `MISSING_INFO` or priced from the wrong amount.
-- The injection regex is a phrase list. A new wording can be missed, and ordinary text with a matching phrase can be flagged.
-- Banned-term detection is keyword based and checks only the latest message.
-- The rules follow this playbook only. A change in the playbook text format breaks the parsers.
-- No negotiation memory beyond the supplier's previous quote, and no language other than English and a few Hindi injection phrases.
+- **Regex parsing.** A price phrased in a way no pattern covers becomes `MISSING_INFO` or is read from the wrong amount. With several prices on one line and no range or tier wording, the first amount is used. Only two-tier quotes are supported.
+- **Injection detection is a phrase list.** A new wording can be missed and then falls through to the normal price rules. Ordinary text can be flagged: the Hindi word for "assistant" matches anywhere, even as a job title.
+- **Banned terms** are keyword based and checked only in the latest message. Explicit negation removal exists only for renewal ("no automatic renewal"). For exclusivity, the common wording "not asking for exclusivity" (118 threads) does not match the patterns, so it is not flagged, but a negated sentence that contains "exclusive supplier" or "exclusively" would be. Advance payment in words is recognized only as "half".
+- **Playbook format.** The parsers expect this playbook's markdown wording. A change in wording breaks them; `engine.py` then fails with an error instead of guessing. If no `policies` folder is found under the data folder, it stops with a `StopIteration` error.
+- **Scope.** English messages only (plus a few Hindi injection phrases). No memory beyond the supplier's previous quote. `precedents/` is not read; its cases are covered by the patterns.
 - Safe use needs the human review described in section 8.
 
 ## 10. Original work & disclosures
 
-- `engine.py`, `verify.py`, `ui.py` and the notebook were written by Alexandru Ilies (team robotech.ai, single member on Kaggle).
-- The AI coding tool **Claude Code (Anthropic)** was used to help write, test and refactor this code. Labels are produced only by running the code, never typed by hand.
-- Libraries: Python standard library only (`csv`, `re`, `math`, `fractions`, `pathlib`, `sys`, `http.server`, `json`). No external packages, templates or third-party code.
-- The only data used is the competition data. No code or labels were shared with other teams.
+- Author: Alexandru Ilies (team robotech.ai, single member on Kaggle).
+- The code (`engine.py`, `verify.py`, `check.py`, `ui.py`, the notebook) was written with **Claude Code (Anthropic)**, an AI coding tool, under my direction. I chose the approach (exact rules instead of an LLM), checked the rules against the playbook, ran every check and made the submissions. Labels are produced only by running the code, never typed by hand.
+- Libraries: Python standard library only (`csv`, `re`, `math`, `fractions`, `pathlib`, `sys`, `io`, `json`, `http.server`, `urllib.parse`). No external packages, templates or third-party code.
+- Data: only the competition files. No code or labels were shared with other teams.
 
 ## 11. How to run
 
 Requires Python 3.9 or newer (tested on 3.13). No installs needed (`requirements.txt` lists no packages).
 
-1. Download the competition files from Kaggle and unzip so that you have `threads.csv` and the playbook folder:
+1. Download the competition files from Kaggle and unzip them into `data/`. The result looks like this (the playbook is already a folder inside the download):
 
    ```
    data/threads.csv
    data/sample_threads.csv
    data/sample_answers.csv
-   data/playbook/...    (unzipped playbook.zip, contains policies/, categories/, suppliers/, amendments/)
+   data/playbook/playbook/policies/ ... categories/ ... suppliers/ ... amendments/ ...
    ```
 
 2. Reproduce the final CSV:
@@ -198,7 +226,7 @@ Requires Python 3.9 or newer (tested on 3.13). No installs needed (`requirements
    python engine.py data/threads.csv submission_out.csv
    ```
 
-   The playbook folder is found automatically (any folder named `policies` under the directory of `threads.csv`). You can also pass it as a third argument: `python engine.py data/threads.csv submission_out.csv data/playbook/playbook`.
+   The playbook folder is found automatically (the folder that contains `policies/`, anywhere under the folder of `threads.csv`). You can also pass it as a third argument: `python engine.py data/threads.csv submission_out.csv data/playbook/playbook`.
 
 3. Check it matches the submitted file (identical bytes):
 
@@ -207,8 +235,13 @@ Requires Python 3.9 or newer (tested on 3.13). No installs needed (`requirements
    cmp submission_out.csv submission.csv          (Linux / macOS)
    ```
 
-4. Optional: check the sample (40/40) with `python engine.py data/sample_threads.csv sample_out.csv` and compare with `data/sample_answers.csv`.
-5. Optional: cross-check with the independent implementation: `python verify.py data/threads.csv verify_out.csv`.
-6. Optional demo UI: `python ui.py data/threads.csv`, then open http://127.0.0.1:8765.
+4. Reproduce all evaluation numbers (sample 40/40, byte match, 1423/1423, 2000/2000):
+
+   ```
+   python check.py
+   ```
+
+5. Optional: run the second implementation alone: `python verify.py data/threads.csv verify_out.csv`.
+6. Optional demo UI: `python ui.py [threads.csv] [playbook_dir]` (defaults: `data/threads.csv`, playbook found automatically), then open http://127.0.0.1:8765.
 
 The output has the header `thread_id,label` and 2,000 rows.
